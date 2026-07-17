@@ -1,0 +1,20 @@
+organizations:
+  - login: rapidfuzz
+    since: "2019-01-01T00:00:00Z"
+  - login: vuejs
+    repositories:
+      - vitepress
+    since: "2020-04-01T00:00:00Z"
+
+collect:
+  repositories: true
+  commits: true
+  issues: true
+  pull_requests: true
+  setup_dependencies: true
+  include_archived: true
+  include_forks: true
+
+# Optional global observation cutoff. Null means collect through now.
+until: null
+

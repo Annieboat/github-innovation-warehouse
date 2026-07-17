@@ -1,0 +1,9 @@
+services:
+  collector:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./exports:/app/exports
+    command: ["collect", "--config", "config/targets.example.yml"]
+
