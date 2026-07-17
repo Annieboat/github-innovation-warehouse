@@ -35,7 +35,7 @@ Only public data is collected. The pipeline never executes repository code. It p
 Requirements: Python 3.11+ and a GitHub token. A token is strongly recommended because unauthenticated API limits are very low.
 
 ```bash
-git clone <this-repository>
+git clone https://github.com/Annieboat/github-innovation-warehouse.git
 cd github-innovation-warehouse
 python -m venv .venv
 source .venv/bin/activate
@@ -163,4 +163,3 @@ make test
 ```
 
 The default CI workflow runs Ruff and pytest on every push and pull request.
-
