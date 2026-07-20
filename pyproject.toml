@@ -27,6 +27,9 @@ dev = [
   "respx>=0.21,<1",
   "ruff>=0.6,<1",
 ]
+bigquery = [
+  "google-cloud-bigquery>=3.25,<4",
+]
 
 [project.scripts]
 ghiw = "github_innovation.cli:app"

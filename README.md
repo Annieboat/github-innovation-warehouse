@@ -2,6 +2,8 @@
 
 A research-oriented pipeline that collects public GitHub organization activity, preserves it in a local DuckDB warehouse, and exposes reproducible SQL/CLI measures for repositories, commits, issues, and pull requests.
 
+It also includes a BigQuery-first bulk workflow for all organizations observed in qualifying public GH Archive events from January 2015 through December 2025. The workflow creates a monthly organization panel and one zero-filled JSON file per organization.
+
 It implements the empirical concepts in the supplied research specification:
 
 - repository creation as the closest proxy for stand-alone innovation;
@@ -48,6 +50,47 @@ ghiw query --sql "SELECT * FROM organization_innovation_summary"
 ```
 
 The example configuration targets the organizations that own the supplied repositories: `rapidfuzz/RapidFuzz` and `vuejs/vitepress`. Edit `config/targets.example.yml` to add organizations, restrict repository names, or set observation windows.
+
+### All observed public organizations, 2015–2025
+
+The bulk workflow aggregates inside BigQuery rather than downloading every global hourly archive. Install the optional dependency and authenticate Google Application Default Credentials:
+
+```bash
+python -m pip install -e ".[bigquery]"
+gcloud auth application-default login
+```
+
+Set your Google Cloud billing project in `.env`:
+
+```dotenv
+GCP_PROJECT=your-google-cloud-project
+GHIW_ORG_JSON_DIR=exports/organizations
+```
+
+Always estimate scanned bytes first:
+
+```bash
+ghiw collect-org-monthly \
+  --start-month 2015-01 \
+  --end-month 2025-12 \
+  --dry-run
+```
+
+Then set a cost guard and run the aggregation:
+
+```bash
+ghiw collect-org-monthly \
+  --start-month 2015-01 \
+  --end-month 2025-12 \
+  --maximum-bytes-billed 5000000000000
+
+ghiw export-org-json \
+  --start-month 2015-01 \
+  --end-month 2025-12 \
+  --output-dir exports/organizations
+```
+
+JSON files are sharded by the first two login characters, for example `exports/organizations/ve/vuejs.json`. Each file contains exactly 132 months, including explicit zero rows. See `docs/BULK_ORGANIZATIONS.md` for coverage, field definitions, cost controls, and a complete JSON example.
 
 ### Search API discovery
 
@@ -126,6 +169,7 @@ For a defensible washer classification, distinguish “observed zero” from “
 
 ```text
 src/github_innovation/
+  bulk.py         BigQuery aggregation and per-organization JSON export
   cli.py          CLI entry points
   config.py       typed YAML/environment configuration
   github.py       GitHub REST/Search client and safe setup.py parser

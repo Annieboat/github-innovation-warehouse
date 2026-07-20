@@ -7,6 +7,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from .bulk import BigQueryMonthlyCollector, OrganizationJSONExporter, YearMonth
 from .config import Settings, load_pipeline_config
 from .db import Warehouse
 from .gharchive import GHArchiveCollector
@@ -97,6 +98,62 @@ def collect_gharchive(
             org, start, end, keep_raw
         )
     console.print(f"[green]Stored[/green] {count} matching events")
+
+
+@app.command("collect-org-monthly")
+def collect_org_monthly(
+    project: Annotated[
+        str | None, typer.Option("--project", help="Google Cloud billing/project ID")
+    ] = None,
+    start_month: Annotated[str, typer.Option("--start-month")] = "2015-01",
+    end_month: Annotated[str, typer.Option("--end-month")] = "2025-12",
+    location: Annotated[str, typer.Option("--location")] = "US",
+    maximum_bytes_billed: Annotated[
+        int | None, typer.Option("--maximum-bytes-billed", min=1)
+    ] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    database: Annotated[Path | None, typer.Option("--database", "-d")] = None,
+) -> None:
+    """Aggregate all public organization activity with GH Archive BigQuery tables."""
+    settings = Settings()
+    billing_project = project or settings.gcp_project
+    if not billing_project:
+        raise typer.BadParameter("Provide --project or set GCP_PROJECT in .env")
+    start, end = YearMonth.parse(start_month), YearMonth.parse(end_month)
+    with Warehouse(database or settings.database) as warehouse:
+        rows, bytes_processed = BigQueryMonthlyCollector(billing_project, warehouse).collect(
+            start,
+            end,
+            location=location,
+            maximum_bytes_billed=maximum_bytes_billed,
+            dry_run=dry_run,
+        )
+    gib = (bytes_processed or 0) / (1024**3)
+    if dry_run:
+        console.print(f"[yellow]Dry run[/yellow]: estimated {gib:,.2f} GiB processed")
+    else:
+        console.print(f"[green]Stored[/green] {rows:,} organization-month rows")
+        console.print(f"BigQuery processed {gib:,.2f} GiB")
+
+
+@app.command("export-org-json")
+def export_org_json(
+    start_month: Annotated[str, typer.Option("--start-month")] = "2015-01",
+    end_month: Annotated[str, typer.Option("--end-month")] = "2025-12",
+    output_dir: Annotated[Path | None, typer.Option("--output-dir", "-o")] = None,
+    database: Annotated[Path | None, typer.Option("--database", "-d")] = None,
+) -> None:
+    """Write one zero-filled monthly JSON file for each observed organization."""
+    settings = Settings()
+    start, end = YearMonth.parse(start_month), YearMonth.parse(end_month)
+    with Warehouse(database or settings.database) as warehouse:
+        warehouse.initialize()
+        manifest = OrganizationJSONExporter(
+            warehouse, output_dir or settings.org_json_dir
+        ).export(start, end)
+    console.print(
+        f"[green]Wrote[/green] {manifest['organization_count']:,} organization JSON files"
+    )
 
 
 @app.command()

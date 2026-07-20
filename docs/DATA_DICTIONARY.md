@@ -15,6 +15,7 @@ All datetimes are stored as DuckDB `TIMESTAMPTZ`. JSON columns preserve arrays o
 | `pull_request` | pull request | `pull_id` | collaborative code review and integration |
 | `gharchive_event` | public GitHub event | `event_id` | historical event record and raw payload |
 | `repository_search_hit` | query-repo-observation | `query, repo_id, matched_at` | reproducible Search API discovery |
+| `organization_public_monthly` | organization-month | `org_login, month` | BigQuery aggregation of qualifying public GH Archive events |
 | `collection_run` | collection attempt | `run_id` | operational audit trail |
 
 ## Commit timestamp semantics
@@ -33,4 +34,20 @@ When both sources contain the same `(repo_id, sha)`, full GitHub API data takes 
 | `repository_current` | repository dimension plus its latest metric snapshot |
 | `organization_monthly_activity` | monthly commits, issue creation, and PR creation |
 | `organization_innovation_summary` | organization-level portfolio/activity totals without join inflation |
+| `organization_public_activity_totals` | additive public-event totals for each observed organization |
 
+## Bulk monthly measures
+
+| Field | Definition |
+|---|---|
+| `public_events` | qualifying public events with a non-null `org.login` |
+| `active_repositories` | distinct repository IDs observed during that month; not additive across months |
+| `distinct_actors` | distinct actor IDs observed during that month; not additive across months |
+| `push_events` | number of `PushEvent` records |
+| `commits_in_pushes` | number of commit objects carried inside `PushEvent` payloads; not a complete git history |
+| `issues_opened` | `IssuesEvent` records with action `opened` |
+| `pull_requests_opened` | `PullRequestEvent` records with action `opened` |
+| `repositories_created` | `CreateEvent` records whose `ref_type` is `repository` |
+| `fork_events` | `ForkEvent` records |
+| `star_events` | `WatchEvent` records with action `started` |
+| `release_events` | `ReleaseEvent` records with action `published` |

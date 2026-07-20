@@ -164,7 +164,7 @@ def parse_setup_requirements(source: str) -> list[tuple[str, str]]:
         return []
     values: dict[str, list[str]] = {}
     for node in tree.body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        if isinstance(node, ast.Assign | ast.AnnAssign):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             value = _literal_string_list(node.value)
             for target in targets:
@@ -194,7 +194,7 @@ def parse_setup_requirements(source: str) -> list[tuple[str, str]]:
 
 
 def _literal_string_list(node: ast.AST | None) -> list[str] | None:
-    if not isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+    if not isinstance(node, ast.List | ast.Tuple | ast.Set):
         return None
     result: list[str] = []
     for element in node.elts:

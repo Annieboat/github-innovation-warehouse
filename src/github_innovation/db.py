@@ -82,8 +82,25 @@ class Warehouse:
             list(row.values()),
         )
 
+    def upsert_many(
+        self, table: str, columns: Sequence[str], rows: Sequence[Sequence[Any]], keys: Sequence[str]
+    ) -> None:
+        """Bulk upsert already-normalized rows using one prepared statement."""
+        if not rows:
+            return
+        placeholders = ", ".join("?" for _ in columns)
+        updates = [column for column in columns if column not in keys]
+        conflict = "DO UPDATE SET " + ", ".join(
+            f"{column}=excluded.{column}" for column in updates
+        )
+        sql = (
+            f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT ({', '.join(keys)}) {conflict}"
+        )
+        self.connection.executemany(sql, rows)
+
     @staticmethod
     def _adapt(value: Any) -> Any:
-        if isinstance(value, (dict, list)):
+        if isinstance(value, dict | list):
             return json.dumps(value, ensure_ascii=False)
         return value

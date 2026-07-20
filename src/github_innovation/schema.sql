@@ -164,6 +164,38 @@ CREATE TABLE IF NOT EXISTS repository_search_hit (
     PRIMARY KEY (query, repo_id, matched_at)
 );
 
+CREATE TABLE IF NOT EXISTS organization_public_monthly (
+    org_login VARCHAR NOT NULL,
+    month DATE NOT NULL,
+    public_events BIGINT NOT NULL,
+    active_repositories BIGINT NOT NULL,
+    distinct_actors BIGINT NOT NULL,
+    push_events BIGINT NOT NULL,
+    commits_in_pushes BIGINT NOT NULL,
+    issues_opened BIGINT NOT NULL,
+    pull_requests_opened BIGINT NOT NULL,
+    repositories_created BIGINT NOT NULL,
+    fork_events BIGINT NOT NULL,
+    star_events BIGINT NOT NULL,
+    release_events BIGINT NOT NULL,
+    source VARCHAR NOT NULL DEFAULT 'gharchive_bigquery',
+    collected_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (org_login, month)
+);
+
+CREATE OR REPLACE VIEW organization_public_activity_totals AS
+SELECT org_login, min(month) first_active_month, max(month) last_active_month,
+       sum(public_events) public_events,
+       sum(push_events) push_events,
+       sum(commits_in_pushes) commits_in_pushes,
+       sum(issues_opened) issues_opened,
+       sum(pull_requests_opened) pull_requests_opened,
+       sum(repositories_created) repositories_created,
+       sum(fork_events) fork_events, sum(star_events) star_events,
+       sum(release_events) release_events
+FROM organization_public_monthly
+GROUP BY org_login;
+
 CREATE OR REPLACE VIEW repository_current AS
 SELECT r.*, s.stargazers_count, s.forks_count, s.watchers_count,
        s.open_issues_count, s.subscribers_count, s.network_count, s.observed_at
