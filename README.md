@@ -128,6 +128,13 @@ ghiw collect-target-org-monthly \
 Run the resumable aggregation, then write JSON directly to Cloud Storage:
 
 ```bash
+ghiw plan-target-run \
+  --organizations 3000000 \
+  --deadline-days 20 \
+  --safety-factor 3 \
+  --machines 4 \
+  --workers 16
+
 ghiw collect-target-org-monthly \
   --dataset github_data \
   --workers 4 \
@@ -137,12 +144,16 @@ ghiw export-target-org-json \
   --dataset github_data \
   --output gs://YOUR_BUCKET/github-organizations-2015-2025 \
   --workers 32 \
+  --expected-organizations 3000000 \
+  --deadline-days 20 \
   --gzip \
   --resume
 ```
 
 For three million targets this creates 396 million explicit organization-month observations across
-three million JSON files. The sparse BigQuery table avoids materializing zero months before export.
+three million JSON files. Completing those files in 20 days requires 1.74 files/second aggregate;
+the planner uses a 5.21 files/second safety target by default and can evaluate a pilot run. The
+sparse BigQuery table avoids materializing zero months before export.
 See `docs/TARGETED_3M_ORGANIZATIONS.md` for architecture, cost controls, restart behavior, output
 contract, performance guidance, and production deployment recommendations.
 
