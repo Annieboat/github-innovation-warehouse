@@ -4,6 +4,10 @@ A research-oriented pipeline that collects public GitHub organization activity, 
 
 It also includes a BigQuery-first bulk workflow for all organizations observed in qualifying public GH Archive events from January 2015 through December 2025. The workflow creates a monthly organization panel and one zero-filled JSON file per organization.
 
+For a supplied census of stable GitHub organization IDs, the targeted workflow is designed for
+millions of organizations. It loads the ID file to BigQuery, performs resumable year-level GH
+Archive aggregation, and writes one 132-month JSON file per ID with parallel, restartable shards.
+
 It implements the empirical concepts in the supplied research specification:
 
 - repository creation as the closest proxy for stand-alone innovation;
@@ -92,6 +96,60 @@ ghiw export-org-json \
 
 JSON files are sharded by the first two login characters, for example `exports/organizations/ve/vuejs.json`. Each file contains exactly 132 months, including explicit zero rows. See `docs/BULK_ORGANIZATIONS.md` for coverage, field definitions, cost controls, and a complete JSON example.
 
+### Targeted census by organization ID (millions of IDs)
+
+Use this workflow when you already have a CSV containing `organization_id`. Stable IDs are used
+for historical matching; `historical_login` is optional metadata. Install cloud dependencies:
+
+```bash
+python -m pip install -e ".[targeted]"
+gcloud auth application-default login
+```
+
+Load and deduplicate the target census once:
+
+```bash
+ghiw load-org-targets \
+  --csv organization_id.csv \
+  --project "$GCP_PROJECT" \
+  --dataset github_data
+```
+
+Estimate the eleven independent year scans before running them:
+
+```bash
+ghiw collect-target-org-monthly \
+  --project "$GCP_PROJECT" \
+  --dataset github_data \
+  --start-month 2015-01 \
+  --end-month 2025-12 \
+  --workers 4 \
+  --dry-run
+```
+
+Run the resumable aggregation, then write JSON directly to Cloud Storage:
+
+```bash
+ghiw collect-target-org-monthly \
+  --project "$GCP_PROJECT" \
+  --dataset github_data \
+  --workers 4 \
+  --resume
+
+ghiw export-target-org-json \
+  --project "$GCP_PROJECT" \
+  --dataset github_data \
+  --output gs://YOUR_BUCKET/github-organizations-2015-2025 \
+  --workers 32 \
+  --gzip \
+  --resume
+```
+
+For three million targets this creates 396 million explicit organization-month observations across
+three million JSON files. The sparse BigQuery table avoids materializing zero months before export.
+See `docs/TARGETED_3M_ORGANIZATIONS.md` for architecture, cost controls, restart behavior, output
+contract, performance guidance, and production deployment recommendations.
+
 ### Search API discovery
 
 Search and persist up to 1,000 ranked results from a GitHub repository query:
@@ -170,6 +228,7 @@ For a defensible washer classification, distinguish “observed zero” from “
 ```text
 src/github_innovation/
   bulk.py         BigQuery aggregation and per-organization JSON export
+  targeted.py     million-ID BigQuery collection and sharded JSON export
   cli.py          CLI entry points
   config.py       typed YAML/environment configuration
   github.py       GitHub REST/Search client and safe setup.py parser
