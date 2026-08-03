@@ -30,6 +30,10 @@ dev = [
 bigquery = [
   "google-cloud-bigquery>=3.25,<4",
 ]
+targeted = [
+  "google-cloud-bigquery>=3.25,<4",
+  "google-cloud-storage>=2.18,<4",
+]
 
 [project.scripts]
 ghiw = "github_innovation.cli:app"
