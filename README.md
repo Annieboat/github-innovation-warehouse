@@ -111,7 +111,6 @@ Load and deduplicate the target census once:
 ```bash
 ghiw load-org-targets \
   --csv organization_id.csv \
-  --project "$GCP_PROJECT" \
   --dataset github_data
 ```
 
@@ -119,7 +118,6 @@ Estimate the eleven independent year scans before running them:
 
 ```bash
 ghiw collect-target-org-monthly \
-  --project "$GCP_PROJECT" \
   --dataset github_data \
   --start-month 2015-01 \
   --end-month 2025-12 \
@@ -131,13 +129,11 @@ Run the resumable aggregation, then write JSON directly to Cloud Storage:
 
 ```bash
 ghiw collect-target-org-monthly \
-  --project "$GCP_PROJECT" \
   --dataset github_data \
   --workers 4 \
   --resume
 
 ghiw export-target-org-json \
-  --project "$GCP_PROJECT" \
   --dataset github_data \
   --output gs://YOUR_BUCKET/github-organizations-2015-2025 \
   --workers 32 \
