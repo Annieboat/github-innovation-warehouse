@@ -42,6 +42,8 @@ python -m pip install -r requirements-direct.txt
 
 gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID
+gcloud auth application-default set-quota-project YOUR_PROJECT_ID
+gcloud services enable bigquery.googleapis.com --project YOUR_PROJECT_ID
 ```
 
 Estimate scanned bytes first. A dry run writes nothing:

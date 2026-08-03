@@ -241,11 +241,15 @@ def collect_rows(
     config = bigquery.QueryJobConfig(
         dry_run=dry_run,
         use_query_cache=not dry_run,
-        maximum_bytes_billed=maximum_bytes_billed,
         query_parameters=[
             bigquery.ArrayQueryParameter("organization_ids", "INT64", organization_ids)
         ],
     )
+    # Some google-cloud-bigquery/Python combinations serialize an explicitly
+    # supplied None as the string "None", which the API rejects as TYPE_INT64.
+    # Omitting the property preserves BigQuery's normal unlimited default.
+    if maximum_bytes_billed is not None:
+        config.maximum_bytes_billed = maximum_bytes_billed
     job = client.query(monthly_query(start, end), job_config=config, location=location)
     bytes_processed = int(job.total_bytes_processed or 0)
     return ([] if dry_run else job.result(page_size=10_000)), bytes_processed
