@@ -11,6 +11,8 @@ from github_innovation.targeted import (
     TargetOrganizationJSONExporter,
     normalize_target_csv,
     parse_shard_spec,
+    plan_throughput,
+    split_shards,
     yearly_aggregation_sql,
 )
 
@@ -94,3 +96,35 @@ def test_target_export_zero_fills_and_keys_file_by_id(tmp_path):
 )
 def test_parse_shard_spec(spec, expected):
     assert parse_shard_spec(spec, 8) == expected
+
+
+def test_throughput_plan_for_three_million_files_in_twenty_days():
+    plan = plan_throughput(3_000_000, 20, safety_factor=3)
+
+    assert plan.required_per_second == pytest.approx(1.7361111111)
+    assert plan.target_per_second == pytest.approx(5.2083333333)
+    assert plan.required_per_day == 150_000
+
+
+def test_throughput_plan_projects_pilot_and_deadline_status():
+    plan = plan_throughput(
+        3_000_000,
+        20,
+        sample_organizations=10_000,
+        sample_seconds=1_000,
+    )
+
+    assert plan.observed_per_second == 10
+    assert plan.projected_days == pytest.approx(3.4722222222)
+    assert plan.meets_deadline is True
+
+
+def test_split_shards_across_four_machines():
+    assignments = split_shards(256, 4)
+
+    assert [assignment.shard_spec for assignment in assignments] == [
+        "0-63",
+        "64-127",
+        "128-191",
+        "192-255",
+    ]
