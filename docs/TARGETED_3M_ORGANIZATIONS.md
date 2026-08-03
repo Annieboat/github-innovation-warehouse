@@ -47,6 +47,8 @@ historical_login
 
 `org_id` and `login` are accepted aliases. UTF-8 files with or without a BOM are supported. Extra
 columns are ignored. IDs must be positive integers. BigQuery removes duplicate IDs after loading.
+This means a direct export of `observed_organizations_2015_2025` is accepted without deleting fields
+such as `first_observed_at`, `public_event_count`, or `event_types`.
 
 Example:
 
@@ -55,6 +57,20 @@ historical_login,organization_id
 skillmap,62525946
 skillmapper,23345238
 skillmappr,142762711
+```
+
+Validate the input locally before starting a billed BigQuery job:
+
+```bash
+ghiw validate-org-targets --csv /path/to/organizaton_id.csv
+```
+
+To also create a minimal two-column copy:
+
+```bash
+ghiw validate-org-targets \
+  --csv /path/to/organizaton_id.csv \
+  --normalized-output organization_targets.normalized.csv
 ```
 
 ## Installation and authentication
