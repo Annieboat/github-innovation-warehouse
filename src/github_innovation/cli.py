@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from .bulk import BigQueryMonthlyCollector, OrganizationJSONExporter, YearMonth
 from .config import Settings, load_pipeline_config
@@ -15,6 +17,17 @@ from .github import GitHubClient
 from .metrics import metrics_sql
 from .pipeline import GitHubPipeline
 from .query import execute_query, print_table, write_csv
+from .targeted import (
+    DEFAULT_EXPORT_SHARDS,
+    GCSJsonSink,
+    LocalJsonSink,
+    TargetedBigQueryPipeline,
+    TargetOrganizationJSONExporter,
+    normalize_target_csv,
+    parse_shard_spec,
+    plan_throughput,
+    split_shards,
+)
 
 app = typer.Typer(no_args_is_help=True, help="GitHub innovation data warehouse CLI")
 console = Console()
@@ -148,12 +161,235 @@ def export_org_json(
     start, end = YearMonth.parse(start_month), YearMonth.parse(end_month)
     with Warehouse(database or settings.database) as warehouse:
         warehouse.initialize()
-        manifest = OrganizationJSONExporter(
-            warehouse, output_dir or settings.org_json_dir
-        ).export(start, end)
+        manifest = OrganizationJSONExporter(warehouse, output_dir or settings.org_json_dir).export(
+            start, end
+        )
     console.print(
         f"[green]Wrote[/green] {manifest['organization_count']:,} organization JSON files"
     )
+
+
+@app.command("load-org-targets")
+def load_org_targets(
+    csv_path: Annotated[Path, typer.Option("--csv", exists=True, dir_okay=False)],
+    project: Annotated[
+        str | None, typer.Option("--project", help="Google Cloud billing/project ID")
+    ] = None,
+    dataset: Annotated[str | None, typer.Option("--dataset")] = None,
+    table: Annotated[str, typer.Option("--table")] = "organization_targets",
+    export_shards: Annotated[int, typer.Option("--export-shards", min=1)] = DEFAULT_EXPORT_SHARDS,
+    location: Annotated[str, typer.Option("--location")] = "US",
+) -> None:
+    """Load a large organization-ID CSV into a deduplicated BigQuery target table."""
+    settings = Settings()
+    billing_project = project or settings.gcp_project
+    if not billing_project:
+        raise typer.BadParameter("Provide --project or set GCP_PROJECT in .env")
+    pipeline = TargetedBigQueryPipeline(
+        billing_project, dataset or settings.target_dataset, location
+    )
+    stats = pipeline.load_targets(csv_path, table=table, export_shards=export_shards)
+    console.print(f"[green]Loaded[/green] {stats.rows:,} valid target rows")
+    console.print("BigQuery removes duplicate organization IDs in the final target table")
+
+
+@app.command("validate-org-targets")
+def validate_org_targets(
+    csv_path: Annotated[Path, typer.Option("--csv", exists=True, dir_okay=False)],
+    normalized_output: Annotated[
+        Path | None,
+        typer.Option(
+            "--normalized-output",
+            help="Optional UTF-8 CSV containing only org_id and historical_login",
+        ),
+    ] = None,
+) -> None:
+    """Validate an organization-ID CSV locally without contacting BigQuery."""
+    if normalized_output is not None:
+        normalized_output.parent.mkdir(parents=True, exist_ok=True)
+        stats = normalize_target_csv(csv_path, normalized_output)
+        console.print(f"[green]Valid[/green]: {stats.rows:,} organization-ID rows")
+        console.print(f"Normalized CSV: {normalized_output}")
+        return
+    with tempfile.TemporaryDirectory(prefix="ghiw-validate-targets-") as temporary_dir:
+        stats = normalize_target_csv(csv_path, Path(temporary_dir) / "normalized.csv")
+    console.print(f"[green]Valid[/green]: {stats.rows:,} organization-ID rows")
+    console.print("Extra columns are accepted; BigQuery will deduplicate org_id during loading")
+
+
+@app.command("collect-target-org-monthly")
+def collect_target_org_monthly(
+    project: Annotated[
+        str | None, typer.Option("--project", help="Google Cloud billing/project ID")
+    ] = None,
+    dataset: Annotated[str | None, typer.Option("--dataset")] = None,
+    targets_table: Annotated[str, typer.Option("--targets-table")] = "organization_targets",
+    output_table: Annotated[
+        str, typer.Option("--output-table")
+    ] = "organization_target_monthly_sparse",
+    start_month: Annotated[str, typer.Option("--start-month")] = "2015-01",
+    end_month: Annotated[str, typer.Option("--end-month")] = "2025-12",
+    workers: Annotated[int, typer.Option("--workers", min=1, max=12)] = 4,
+    resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    maximum_bytes_billed: Annotated[
+        int | None, typer.Option("--maximum-bytes-billed", min=1)
+    ] = None,
+    location: Annotated[str, typer.Option("--location")] = "US",
+) -> None:
+    """Scan GH Archive once by year and aggregate only the supplied organization IDs."""
+    settings = Settings()
+    billing_project = project or settings.gcp_project
+    if not billing_project:
+        raise typer.BadParameter("Provide --project or set GCP_PROJECT in .env")
+    pipeline = TargetedBigQueryPipeline(
+        billing_project, dataset or settings.target_dataset, location
+    )
+    result = pipeline.collect_monthly(
+        YearMonth.parse(start_month),
+        YearMonth.parse(end_month),
+        targets_table=targets_table,
+        output_table=output_table,
+        workers=workers,
+        resume=resume,
+        dry_run=dry_run,
+        maximum_bytes_billed=maximum_bytes_billed,
+    )
+    gib = result.bytes_processed / (1024**3)
+    if dry_run:
+        console.print(f"[yellow]Dry run[/yellow]: estimated {gib:,.2f} GiB processed")
+    else:
+        console.print(
+            f"[green]Created[/green] {result.yearly_tables_created} yearly aggregates; "
+            f"skipped {result.yearly_tables_skipped} completed years"
+        )
+        console.print(f"BigQuery processed {gib:,.2f} GiB")
+
+
+@app.command("export-target-org-json")
+def export_target_org_json(
+    project: Annotated[
+        str | None, typer.Option("--project", help="Google Cloud billing/project ID")
+    ] = None,
+    dataset: Annotated[str | None, typer.Option("--dataset")] = None,
+    targets_table: Annotated[str, typer.Option("--targets-table")] = "organization_targets",
+    monthly_table: Annotated[
+        str, typer.Option("--monthly-table")
+    ] = "organization_target_monthly_sparse",
+    output: Annotated[
+        str | None, typer.Option("--output", "-o", help="Local directory or gs:// URI")
+    ] = None,
+    start_month: Annotated[str, typer.Option("--start-month")] = "2015-01",
+    end_month: Annotated[str, typer.Option("--end-month")] = "2025-12",
+    workers: Annotated[int, typer.Option("--workers", min=1, max=64)] = 16,
+    export_shards: Annotated[int, typer.Option("--export-shards", min=1)] = DEFAULT_EXPORT_SHARDS,
+    shards: Annotated[str | None, typer.Option("--shards", help="Example: 0-31,40,52")] = None,
+    resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
+    gzip_output: Annotated[bool, typer.Option("--gzip/--no-gzip")] = False,
+    expected_organizations: Annotated[
+        int, typer.Option("--expected-organizations", min=1)
+    ] = 3_000_000,
+    deadline_days: Annotated[float, typer.Option("--deadline-days", min=0.01)] = 20.0,
+    location: Annotated[str, typer.Option("--location")] = "US",
+) -> None:
+    """Write one zero-filled 132-month JSON file per target organization ID."""
+    settings = Settings()
+    billing_project = project or settings.gcp_project
+    if not billing_project:
+        raise typer.BadParameter("Provide --project or set GCP_PROJECT in .env")
+    destination = output or settings.target_json_output
+    sink = (
+        GCSJsonSink(destination)
+        if destination.startswith("gs://")
+        else LocalJsonSink(Path(destination))
+    )
+    exporter = TargetOrganizationJSONExporter(
+        billing_project,
+        dataset or settings.target_dataset,
+        sink,
+        location=location,
+        targets_table=targets_table,
+        monthly_table=monthly_table,
+        export_shards=export_shards,
+        compressed=gzip_output,
+    )
+    try:
+        selected_shards = parse_shard_spec(shards, export_shards)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    required_rate = plan_throughput(expected_organizations, deadline_days).required_per_second
+
+    def report_progress(completed: int, total: int, written: int, elapsed: float) -> None:
+        rate = written / elapsed if written and elapsed else 0.0
+        projected = expected_organizations / rate / 86_400 if rate else None
+        eta = f"{projected:.2f} projected days" if projected is not None else "measuring rate"
+        status = "on pace" if rate >= required_rate else "below required rate"
+        console.print(
+            f"Shards {completed}/{total}: {written:,} files, {rate:,.2f}/s, "
+            f"{eta}, {status} ({required_rate:,.2f}/s required)"
+        )
+
+    manifest = exporter.export(
+        YearMonth.parse(start_month),
+        YearMonth.parse(end_month),
+        workers=workers,
+        resume=resume,
+        shards=selected_shards,
+        expected_organizations=expected_organizations,
+        deadline_days=deadline_days,
+        progress_callback=report_progress,
+    )
+    console.print(
+        f"[green]Wrote[/green] {manifest['organization_count_written']:,} organization files; "
+        f"skipped {manifest['export_shards_skipped']} completed shards"
+    )
+
+
+@app.command("plan-target-run")
+def plan_target_run(
+    organizations: Annotated[int, typer.Option("--organizations", min=1)] = 3_000_000,
+    deadline_days: Annotated[float, typer.Option("--deadline-days", min=0.01)] = 20.0,
+    safety_factor: Annotated[float, typer.Option("--safety-factor", min=1.0)] = 3.0,
+    workers: Annotated[int, typer.Option("--workers", min=1)] = 32,
+    machines: Annotated[int, typer.Option("--machines", min=1)] = 1,
+    export_shards: Annotated[int, typer.Option("--export-shards", min=1)] = DEFAULT_EXPORT_SHARDS,
+    sample_organizations: Annotated[
+        int | None, typer.Option("--sample-organizations", min=1)
+    ] = None,
+    sample_seconds: Annotated[float | None, typer.Option("--sample-seconds", min=0.01)] = None,
+) -> None:
+    """Plan and validate the throughput required for a targeted JSON export."""
+    try:
+        plan = plan_throughput(
+            organizations,
+            deadline_days,
+            safety_factor=safety_factor,
+            sample_organizations=sample_organizations,
+            sample_seconds=sample_seconds,
+        )
+        assignments = split_shards(export_shards, machines)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"Required aggregate rate: [bold]{plan.required_per_second:,.2f} files/s[/bold]")
+    console.print(
+        f"Safety target ({safety_factor:g}x): [bold]{plan.target_per_second:,.2f} files/s[/bold]"
+    )
+    console.print(f"Required daily output: {plan.required_per_day:,.0f} files/day")
+    console.print(
+        f"Required per worker at {machines * workers} total workers: "
+        f"{plan.required_per_second / (machines * workers):,.4f} files/s"
+    )
+    if plan.observed_per_second is not None:
+        colour = "green" if plan.meets_deadline else "red"
+        console.print(
+            f"Pilot result: [{colour}]{plan.observed_per_second:,.2f} files/s; "
+            f"{plan.projected_days:,.2f} projected days[/{colour}]"
+        )
+    table = Table("Machine", "Shard range", "Workers")
+    for assignment in assignments:
+        table.add_row(str(assignment.machine), assignment.shard_spec, str(workers))
+    console.print(table)
 
 
 @app.command()

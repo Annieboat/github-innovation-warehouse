@@ -18,8 +18,10 @@ class Settings(BaseSettings):
     user_agent: str = Field(default="github-innovation-warehouse/0.1", alias="GHIW_USER_AGENT")
     request_timeout: float = Field(default=30.0, alias="GHIW_REQUEST_TIMEOUT")
     gcp_project: str | None = Field(default=None, alias="GCP_PROJECT")
-    org_json_dir: Path = Field(
-        default=Path("exports/organizations"), alias="GHIW_ORG_JSON_DIR"
+    org_json_dir: Path = Field(default=Path("exports/organizations"), alias="GHIW_ORG_JSON_DIR")
+    target_dataset: str = Field(default="github_data", alias="GHIW_TARGET_DATASET")
+    target_json_output: str = Field(
+        default="exports/target-organizations", alias="GHIW_TARGET_JSON_OUTPUT"
     )
 
 
