@@ -15,6 +15,14 @@ from .github import GitHubClient
 from .metrics import metrics_sql
 from .pipeline import GitHubPipeline
 from .query import execute_query, print_table, write_csv
+from .targeted import (
+    DEFAULT_EXPORT_SHARDS,
+    GCSJsonSink,
+    LocalJsonSink,
+    TargetedBigQueryPipeline,
+    TargetOrganizationJSONExporter,
+    parse_shard_spec,
+)
 
 app = typer.Typer(no_args_is_help=True, help="GitHub innovation data warehouse CLI")
 console = Console()
@@ -148,11 +156,144 @@ def export_org_json(
     start, end = YearMonth.parse(start_month), YearMonth.parse(end_month)
     with Warehouse(database or settings.database) as warehouse:
         warehouse.initialize()
-        manifest = OrganizationJSONExporter(
-            warehouse, output_dir or settings.org_json_dir
-        ).export(start, end)
+        manifest = OrganizationJSONExporter(warehouse, output_dir or settings.org_json_dir).export(
+            start, end
+        )
     console.print(
         f"[green]Wrote[/green] {manifest['organization_count']:,} organization JSON files"
+    )
+
+
+@app.command("load-org-targets")
+def load_org_targets(
+    csv_path: Annotated[Path, typer.Option("--csv", exists=True, dir_okay=False)],
+    project: Annotated[
+        str | None, typer.Option("--project", help="Google Cloud billing/project ID")
+    ] = None,
+    dataset: Annotated[str | None, typer.Option("--dataset")] = None,
+    table: Annotated[str, typer.Option("--table")] = "organization_targets",
+    export_shards: Annotated[int, typer.Option("--export-shards", min=1)] = DEFAULT_EXPORT_SHARDS,
+    location: Annotated[str, typer.Option("--location")] = "US",
+) -> None:
+    """Load a large organization-ID CSV into a deduplicated BigQuery target table."""
+    settings = Settings()
+    billing_project = project or settings.gcp_project
+    if not billing_project:
+        raise typer.BadParameter("Provide --project or set GCP_PROJECT in .env")
+    pipeline = TargetedBigQueryPipeline(
+        billing_project, dataset or settings.target_dataset, location
+    )
+    stats = pipeline.load_targets(csv_path, table=table, export_shards=export_shards)
+    console.print(f"[green]Loaded[/green] {stats.rows:,} valid target rows")
+    console.print("BigQuery removes duplicate organization IDs in the final target table")
+
+
+@app.command("collect-target-org-monthly")
+def collect_target_org_monthly(
+    project: Annotated[
+        str | None, typer.Option("--project", help="Google Cloud billing/project ID")
+    ] = None,
+    dataset: Annotated[str | None, typer.Option("--dataset")] = None,
+    targets_table: Annotated[str, typer.Option("--targets-table")] = "organization_targets",
+    output_table: Annotated[
+        str, typer.Option("--output-table")
+    ] = "organization_target_monthly_sparse",
+    start_month: Annotated[str, typer.Option("--start-month")] = "2015-01",
+    end_month: Annotated[str, typer.Option("--end-month")] = "2025-12",
+    workers: Annotated[int, typer.Option("--workers", min=1, max=12)] = 4,
+    resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    maximum_bytes_billed: Annotated[
+        int | None, typer.Option("--maximum-bytes-billed", min=1)
+    ] = None,
+    location: Annotated[str, typer.Option("--location")] = "US",
+) -> None:
+    """Scan GH Archive once by year and aggregate only the supplied organization IDs."""
+    settings = Settings()
+    billing_project = project or settings.gcp_project
+    if not billing_project:
+        raise typer.BadParameter("Provide --project or set GCP_PROJECT in .env")
+    pipeline = TargetedBigQueryPipeline(
+        billing_project, dataset or settings.target_dataset, location
+    )
+    result = pipeline.collect_monthly(
+        YearMonth.parse(start_month),
+        YearMonth.parse(end_month),
+        targets_table=targets_table,
+        output_table=output_table,
+        workers=workers,
+        resume=resume,
+        dry_run=dry_run,
+        maximum_bytes_billed=maximum_bytes_billed,
+    )
+    gib = result.bytes_processed / (1024**3)
+    if dry_run:
+        console.print(f"[yellow]Dry run[/yellow]: estimated {gib:,.2f} GiB processed")
+    else:
+        console.print(
+            f"[green]Created[/green] {result.yearly_tables_created} yearly aggregates; "
+            f"skipped {result.yearly_tables_skipped} completed years"
+        )
+        console.print(f"BigQuery processed {gib:,.2f} GiB")
+
+
+@app.command("export-target-org-json")
+def export_target_org_json(
+    project: Annotated[
+        str | None, typer.Option("--project", help="Google Cloud billing/project ID")
+    ] = None,
+    dataset: Annotated[str | None, typer.Option("--dataset")] = None,
+    targets_table: Annotated[str, typer.Option("--targets-table")] = "organization_targets",
+    monthly_table: Annotated[
+        str, typer.Option("--monthly-table")
+    ] = "organization_target_monthly_sparse",
+    output: Annotated[
+        str | None, typer.Option("--output", "-o", help="Local directory or gs:// URI")
+    ] = None,
+    start_month: Annotated[str, typer.Option("--start-month")] = "2015-01",
+    end_month: Annotated[str, typer.Option("--end-month")] = "2025-12",
+    workers: Annotated[int, typer.Option("--workers", min=1, max=64)] = 16,
+    export_shards: Annotated[int, typer.Option("--export-shards", min=1)] = DEFAULT_EXPORT_SHARDS,
+    shards: Annotated[str | None, typer.Option("--shards", help="Example: 0-31,40,52")] = None,
+    resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
+    gzip_output: Annotated[bool, typer.Option("--gzip/--no-gzip")] = False,
+    location: Annotated[str, typer.Option("--location")] = "US",
+) -> None:
+    """Write one zero-filled 132-month JSON file per target organization ID."""
+    settings = Settings()
+    billing_project = project or settings.gcp_project
+    if not billing_project:
+        raise typer.BadParameter("Provide --project or set GCP_PROJECT in .env")
+    destination = output or settings.target_json_output
+    sink = (
+        GCSJsonSink(destination)
+        if destination.startswith("gs://")
+        else LocalJsonSink(Path(destination))
+    )
+    exporter = TargetOrganizationJSONExporter(
+        billing_project,
+        dataset or settings.target_dataset,
+        sink,
+        location=location,
+        targets_table=targets_table,
+        monthly_table=monthly_table,
+        export_shards=export_shards,
+        compressed=gzip_output,
+    )
+    try:
+        selected_shards = parse_shard_spec(shards, export_shards)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    manifest = exporter.export(
+        YearMonth.parse(start_month),
+        YearMonth.parse(end_month),
+        workers=workers,
+        resume=resume,
+        shards=selected_shards,
+    )
+    console.print(
+        f"[green]Wrote[/green] {manifest['organization_count_written']:,} organization files; "
+        f"skipped {manifest['export_shards_skipped']} completed shards"
     )
 
 
