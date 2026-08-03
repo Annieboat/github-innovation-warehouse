@@ -173,6 +173,21 @@ time is the enclosing public push-event time, not an individual Git commit times
 
 ## Step 3: export one JSON per ID
 
+Plan the 20-day run before exporting:
+
+```bash
+ghiw plan-target-run \
+  --organizations 3000000 \
+  --deadline-days 20 \
+  --safety-factor 3 \
+  --machines 4 \
+  --workers 16
+```
+
+For three million files, the hard minimum is **1.74 files/second** or 150,000 files/day. The default
+3x safety target is **5.21 files/second**. The planner also prints non-overlapping shard ranges for
+each machine.
+
 Cloud Storage is recommended for three million files:
 
 ```bash
@@ -180,6 +195,8 @@ ghiw export-target-org-json \
   --dataset github_data \
   --output gs://YOUR_BUCKET/github-organizations-2015-2025 \
   --workers 32 \
+  --expected-organizations 3000000 \
+  --deadline-days 20 \
   --gzip \
   --resume
 ```
@@ -252,13 +269,56 @@ Export shards:         256
 Output prefixes:       4,096
 ```
 
+### Validate the 20-day target with a pilot
+
+Run four shards to the production destination and record the organization count and elapsed seconds
+reported by the command:
+
+```bash
+ghiw export-target-org-json \
+  --dataset github_data \
+  --output gs://YOUR_BUCKET/github-organizations-2015-2025 \
+  --workers 16 \
+  --shards 0-3 \
+  --expected-organizations 3000000 \
+  --deadline-days 20 \
+  --gzip \
+  --resume
+```
+
+Feed the pilot result back to the planner:
+
+```bash
+ghiw plan-target-run \
+  --sample-organizations PILOT_FILE_COUNT \
+  --sample-seconds PILOT_ELAPSED_SECONDS \
+  --machines 4 \
+  --workers 16
+```
+
+The live exporter reports files/second, projected full-run days, and whether the observed rate meets
+the 20-day minimum after each shard. `manifest.json` records the same elapsed time, average rate,
+projection, and deadline result.
+
+If the pilot is below the 5.21 files/second safety target, first increase workers gradually up to 64.
+If one VM remains slow, use four VMs with the planner's ranges (`0-63`, `64-127`, `128-191`, and
+`192-255`). Run the same command on each VM with its own `--shards` value and a common GCS prefix.
+Completion markers make retries safe. The last writer updates `manifest.json`; shard markers are the
+authoritative completion record during a distributed run.
+
+The 20-day target applies to the JSON export after the BigQuery aggregation exists. Schedule the
+yearly aggregation before that window or include its measured pilot duration in the operational
+buffer. No program can guarantee cloud quotas, regional incidents, billing approval, or network
+capacity, so use the 3x target and monitor progress rather than operating at the 1.74/s boundary.
+
 Increase BigQuery workers only after checking project slot contention. Increase JSON workers
 gradually while monitoring Cloud Storage throttling and BigQuery concurrent query usage. GitHub REST
 API tokens are not used in this workflow.
 
 Wall-clock time cannot be inferred from ID count alone. The archive scan depends mainly on selected
 years and BigQuery capacity, while the export depends on sparse-row count, object size, compression,
-worker count, and Cloud Storage request throughput. Benchmark shards `0-3`, then estimate:
+worker count, and Cloud Storage request throughput. Benchmark shards `0-3`; `plan-target-run`
+performs the extrapolation automatically. The equivalent manual estimate is:
 
 ```text
 full JSON time ~= sample elapsed time * 256 / 4
