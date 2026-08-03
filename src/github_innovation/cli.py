@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -22,6 +23,7 @@ from .targeted import (
     LocalJsonSink,
     TargetedBigQueryPipeline,
     TargetOrganizationJSONExporter,
+    normalize_target_csv,
     parse_shard_spec,
     plan_throughput,
     split_shards,
@@ -189,6 +191,30 @@ def load_org_targets(
     stats = pipeline.load_targets(csv_path, table=table, export_shards=export_shards)
     console.print(f"[green]Loaded[/green] {stats.rows:,} valid target rows")
     console.print("BigQuery removes duplicate organization IDs in the final target table")
+
+
+@app.command("validate-org-targets")
+def validate_org_targets(
+    csv_path: Annotated[Path, typer.Option("--csv", exists=True, dir_okay=False)],
+    normalized_output: Annotated[
+        Path | None,
+        typer.Option(
+            "--normalized-output",
+            help="Optional UTF-8 CSV containing only org_id and historical_login",
+        ),
+    ] = None,
+) -> None:
+    """Validate an organization-ID CSV locally without contacting BigQuery."""
+    if normalized_output is not None:
+        normalized_output.parent.mkdir(parents=True, exist_ok=True)
+        stats = normalize_target_csv(csv_path, normalized_output)
+        console.print(f"[green]Valid[/green]: {stats.rows:,} organization-ID rows")
+        console.print(f"Normalized CSV: {normalized_output}")
+        return
+    with tempfile.TemporaryDirectory(prefix="ghiw-validate-targets-") as temporary_dir:
+        stats = normalize_target_csv(csv_path, Path(temporary_dir) / "normalized.csv")
+    console.print(f"[green]Valid[/green]: {stats.rows:,} organization-ID rows")
+    console.print("Extra columns are accepted; BigQuery will deduplicate org_id during loading")
 
 
 @app.command("collect-target-org-monthly")
