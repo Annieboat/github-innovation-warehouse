@@ -2,6 +2,31 @@
 
 A research-oriented pipeline that collects public GitHub organization activity, preserves it in a local DuckDB warehouse, and exposes reproducible SQL/CLI measures for repositories, commits, issues, and pull requests.
 
+## Simplest workflow: CSV IDs directly to JSON and CSV (no database)
+
+If you have a CSV containing `organization_id` and only want ready-to-use files, run the standalone script. It creates one 132-month JSON file per organization, a combined CSV, and a manifest. It does not create DuckDB or persistent BigQuery tables.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-direct.txt
+gcloud auth application-default login
+
+# Estimate the public GH Archive query first
+python export_organization_monthly.py \\
+  --csv "/path/to/organizaton_id.csv" \\
+  --project YOUR_PROJECT_ID \\
+  --dry-run
+
+# Write ordinary files to outputs/organization_monthly
+python export_organization_monthly.py \\
+  --csv "/path/to/organizaton_id.csv" \\
+  --project YOUR_PROJECT_ID \\
+  --output outputs/organization_monthly
+```
+
+See [DIRECT_EXPORT.md](DIRECT_EXPORT.md) for the exact output layout, fields, scale boundary, and inspection commands.
+
 It also includes a BigQuery-first bulk workflow for all organizations observed in qualifying public GH Archive events from January 2015 through December 2025. The workflow creates a monthly organization panel and one zero-filled JSON file per organization.
 
 It implements the empirical concepts in the supplied research specification:
