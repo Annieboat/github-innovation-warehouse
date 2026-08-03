@@ -109,6 +109,8 @@ gcloud auth application-default login
 Load and deduplicate the target census once:
 
 ```bash
+ghiw validate-org-targets --csv organization_id.csv
+
 ghiw load-org-targets \
   --csv organization_id.csv \
   --dataset github_data
