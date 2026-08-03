@@ -6,6 +6,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from .bulk import BigQueryMonthlyCollector, OrganizationJSONExporter, YearMonth
 from .config import Settings, load_pipeline_config
@@ -22,6 +23,8 @@ from .targeted import (
     TargetedBigQueryPipeline,
     TargetOrganizationJSONExporter,
     parse_shard_spec,
+    plan_throughput,
+    split_shards,
 )
 
 app = typer.Typer(no_args_is_help=True, help="GitHub innovation data warehouse CLI")
@@ -257,6 +260,10 @@ def export_target_org_json(
     shards: Annotated[str | None, typer.Option("--shards", help="Example: 0-31,40,52")] = None,
     resume: Annotated[bool, typer.Option("--resume/--no-resume")] = True,
     gzip_output: Annotated[bool, typer.Option("--gzip/--no-gzip")] = False,
+    expected_organizations: Annotated[
+        int, typer.Option("--expected-organizations", min=1)
+    ] = 3_000_000,
+    deadline_days: Annotated[float, typer.Option("--deadline-days", min=0.01)] = 20.0,
     location: Annotated[str, typer.Option("--location")] = "US",
 ) -> None:
     """Write one zero-filled 132-month JSON file per target organization ID."""
@@ -284,17 +291,79 @@ def export_target_org_json(
         selected_shards = parse_shard_spec(shards, export_shards)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+    required_rate = plan_throughput(expected_organizations, deadline_days).required_per_second
+
+    def report_progress(completed: int, total: int, written: int, elapsed: float) -> None:
+        rate = written / elapsed if written and elapsed else 0.0
+        projected = expected_organizations / rate / 86_400 if rate else None
+        eta = f"{projected:.2f} projected days" if projected is not None else "measuring rate"
+        status = "on pace" if rate >= required_rate else "below required rate"
+        console.print(
+            f"Shards {completed}/{total}: {written:,} files, {rate:,.2f}/s, "
+            f"{eta}, {status} ({required_rate:,.2f}/s required)"
+        )
+
     manifest = exporter.export(
         YearMonth.parse(start_month),
         YearMonth.parse(end_month),
         workers=workers,
         resume=resume,
         shards=selected_shards,
+        expected_organizations=expected_organizations,
+        deadline_days=deadline_days,
+        progress_callback=report_progress,
     )
     console.print(
         f"[green]Wrote[/green] {manifest['organization_count_written']:,} organization files; "
         f"skipped {manifest['export_shards_skipped']} completed shards"
     )
+
+
+@app.command("plan-target-run")
+def plan_target_run(
+    organizations: Annotated[int, typer.Option("--organizations", min=1)] = 3_000_000,
+    deadline_days: Annotated[float, typer.Option("--deadline-days", min=0.01)] = 20.0,
+    safety_factor: Annotated[float, typer.Option("--safety-factor", min=1.0)] = 3.0,
+    workers: Annotated[int, typer.Option("--workers", min=1)] = 32,
+    machines: Annotated[int, typer.Option("--machines", min=1)] = 1,
+    export_shards: Annotated[int, typer.Option("--export-shards", min=1)] = DEFAULT_EXPORT_SHARDS,
+    sample_organizations: Annotated[
+        int | None, typer.Option("--sample-organizations", min=1)
+    ] = None,
+    sample_seconds: Annotated[float | None, typer.Option("--sample-seconds", min=0.01)] = None,
+) -> None:
+    """Plan and validate the throughput required for a targeted JSON export."""
+    try:
+        plan = plan_throughput(
+            organizations,
+            deadline_days,
+            safety_factor=safety_factor,
+            sample_organizations=sample_organizations,
+            sample_seconds=sample_seconds,
+        )
+        assignments = split_shards(export_shards, machines)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"Required aggregate rate: [bold]{plan.required_per_second:,.2f} files/s[/bold]")
+    console.print(
+        f"Safety target ({safety_factor:g}x): [bold]{plan.target_per_second:,.2f} files/s[/bold]"
+    )
+    console.print(f"Required daily output: {plan.required_per_day:,.0f} files/day")
+    console.print(
+        f"Required per worker at {machines * workers} total workers: "
+        f"{plan.required_per_second / (machines * workers):,.4f} files/s"
+    )
+    if plan.observed_per_second is not None:
+        colour = "green" if plan.meets_deadline else "red"
+        console.print(
+            f"Pilot result: [{colour}]{plan.observed_per_second:,.2f} files/s; "
+            f"{plan.projected_days:,.2f} projected days[/{colour}]"
+        )
+    table = Table("Machine", "Shard range", "Workers")
+    for assignment in assignments:
+        table.add_row(str(assignment.machine), assignment.shard_spec, str(workers))
+    console.print(table)
 
 
 @app.command()
