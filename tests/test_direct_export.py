@@ -42,6 +42,58 @@ def test_query_is_read_only_and_filters_supplied_ids():
     assert "IN UNNEST(@organization_ids)" in query
 
 
+def test_none_maximum_bytes_is_not_sent_to_bigquery(monkeypatch):
+    import google.cloud
+
+    captured = {}
+
+    class FakeJobConfig:
+        def __init__(self, **kwargs):
+            captured["config_kwargs"] = kwargs
+
+    class FakeJob:
+        total_bytes_processed = 0
+
+        @staticmethod
+        def result(page_size):
+            assert page_size == 10_000
+            return []
+
+    class FakeClient:
+        def __init__(self, project, location):
+            assert project == "example-project"
+            assert location == "US"
+
+        @staticmethod
+        def query(query, job_config, location):
+            assert query
+            assert job_config
+            assert location == "US"
+            return FakeJob()
+
+    class FakeBigQuery:
+        Client = FakeClient
+        QueryJobConfig = FakeJobConfig
+
+        @staticmethod
+        def ArrayQueryParameter(name, kind, values):
+            return name, kind, values
+
+    monkeypatch.setattr(google.cloud, "bigquery", FakeBigQuery, raising=False)
+
+    rows, processed = direct_export.collect_rows(
+        "example-project",
+        [62525946],
+        YearMonth.parse("2015-01"),
+        YearMonth.parse("2025-12"),
+        maximum_bytes_billed=None,
+    )
+
+    assert list(rows) == []
+    assert processed == 0
+    assert "maximum_bytes_billed" not in captured["config_kwargs"]
+
+
 def test_panel_zero_fills_and_writes_json_and_combined_csv(tmp_path):
     values = {metric: 0 for metric in METRICS}
     values.update(public_events=3, push_events=1, commits_in_pushes=4)
