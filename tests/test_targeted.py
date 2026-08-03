@@ -45,6 +45,27 @@ def test_normalize_target_csv_rejects_invalid_ids(tmp_path):
         normalize_target_csv(source, tmp_path / "normalized.csv")
 
 
+def test_normalize_target_csv_accepts_observed_organization_bigquery_export(tmp_path):
+    source = tmp_path / "observed_organizations.csv"
+    destination = tmp_path / "normalized.csv"
+    source.write_text(
+        "\ufeffhistorical_login,first_observed_at,public_event_count,organization_id,"
+        "is_observed_organization,event_types\n"
+        "skillmap,2020-03-23 00:02:07 UTC,14,62525946,TRUE,CreateEvent|PushEvent\n"
+        "skillmapper,2016-11-08 20:16:48 UTC,1,23345238,TRUE,CreateEvent\n",
+        encoding="utf-8",
+    )
+
+    stats = normalize_target_csv(source, destination)
+
+    assert stats.rows == 2
+    assert destination.read_text(encoding="utf-8").splitlines() == [
+        "org_id,historical_login",
+        "62525946,skillmap",
+        "23345238,skillmapper",
+    ]
+
+
 def test_yearly_sql_matches_stable_ids_and_one_year_only():
     query = yearly_aggregation_sql(
         "example-project", "github_data", "organization_targets", "monthly_2020", 2020
