@@ -82,7 +82,6 @@ BigQuery tables are in the US multi-region.
 ```bash
 ghiw load-org-targets \
   --csv /path/to/organization_id.csv \
-  --project "$GCP_PROJECT" \
   --dataset github_data \
   --table organization_targets \
   --export-shards 256
@@ -115,7 +114,6 @@ The dry run is free and reports the sum of estimated bytes across the eleven yea
 
 ```bash
 ghiw collect-target-org-monthly \
-  --project "$GCP_PROJECT" \
   --dataset github_data \
   --start-month 2015-01 \
   --end-month 2025-12 \
@@ -128,7 +126,6 @@ run total to approve the complete job. Then run:
 
 ```bash
 ghiw collect-target-org-monthly \
-  --project "$GCP_PROJECT" \
   --dataset github_data \
   --start-month 2015-01 \
   --end-month 2025-12 \
@@ -180,7 +177,6 @@ Cloud Storage is recommended for three million files:
 
 ```bash
 ghiw export-target-org-json \
-  --project "$GCP_PROJECT" \
   --dataset github_data \
   --output gs://YOUR_BUCKET/github-organizations-2015-2025 \
   --workers 32 \
@@ -192,7 +188,6 @@ For a local test:
 
 ```bash
 ghiw export-target-org-json \
-  --project "$GCP_PROJECT" \
   --dataset github_data \
   --output exports/target-organizations \
   --workers 4 \
