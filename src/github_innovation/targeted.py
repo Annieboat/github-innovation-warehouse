@@ -5,7 +5,8 @@ import gzip
 import json
 import re
 import tempfile
-from collections.abc import Iterable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -60,6 +61,83 @@ class ExportShardResult:
     shard: int
     organizations: int
     skipped: bool = False
+
+
+@dataclass(frozen=True)
+class ThroughputPlan:
+    organizations: int
+    deadline_days: float
+    safety_factor: float
+    required_per_second: float
+    target_per_second: float
+    required_per_day: float
+    observed_per_second: float | None = None
+    projected_days: float | None = None
+    meets_deadline: bool | None = None
+
+
+@dataclass(frozen=True)
+class MachineShardAssignment:
+    machine: int
+    first_shard: int
+    last_shard: int
+
+    @property
+    def shard_spec(self) -> str:
+        return (
+            str(self.first_shard)
+            if self.first_shard == self.last_shard
+            else f"{self.first_shard}-{self.last_shard}"
+        )
+
+
+def plan_throughput(
+    organizations: int,
+    deadline_days: float,
+    *,
+    safety_factor: float = 3.0,
+    sample_organizations: int | None = None,
+    sample_seconds: float | None = None,
+) -> ThroughputPlan:
+    """Calculate the aggregate object-write rate needed for a deadline."""
+    if organizations < 1 or deadline_days <= 0 or safety_factor < 1:
+        raise ValueError("organizations and deadline_days must be positive; safety_factor >= 1")
+    if (sample_organizations is None) != (sample_seconds is None):
+        raise ValueError("Provide both sample_organizations and sample_seconds")
+    required = organizations / (deadline_days * 86_400)
+    observed = projected = None
+    meets = None
+    if sample_organizations is not None and sample_seconds is not None:
+        if sample_organizations < 1 or sample_seconds <= 0:
+            raise ValueError("Sample organizations and seconds must be positive")
+        observed = sample_organizations / sample_seconds
+        projected = organizations / observed / 86_400
+        meets = observed >= required
+    return ThroughputPlan(
+        organizations=organizations,
+        deadline_days=deadline_days,
+        safety_factor=safety_factor,
+        required_per_second=required,
+        target_per_second=required * safety_factor,
+        required_per_day=organizations / deadline_days,
+        observed_per_second=observed,
+        projected_days=projected,
+        meets_deadline=meets,
+    )
+
+
+def split_shards(export_shards: int, machines: int) -> list[MachineShardAssignment]:
+    """Allocate contiguous, non-overlapping shard ranges as evenly as possible."""
+    if export_shards < 1 or machines < 1 or machines > export_shards:
+        raise ValueError("Require 1 <= machines <= export_shards")
+    base, extra = divmod(export_shards, machines)
+    assignments = []
+    first = 0
+    for machine in range(1, machines + 1):
+        size = base + int(machine <= extra)
+        assignments.append(MachineShardAssignment(machine, first, first + size - 1))
+        first += size
+    return assignments
 
 
 class QueryJob(Protocol):
@@ -554,9 +632,13 @@ class TargetOrganizationJSONExporter:
         workers: int = 16,
         resume: bool = True,
         shards: Sequence[int] | None = None,
+        expected_organizations: int | None = None,
+        deadline_days: float | None = None,
+        progress_callback: Callable[[int, int, int, float], None] | None = None,
     ) -> dict[str, Any]:
         selected = list(shards) if shards is not None else list(range(self.export_shards))
         results: list[ExportShardResult] = []
+        started = time.monotonic()
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
             futures = {
                 executor.submit(self._export_shard, shard, start, end, resume): shard
@@ -564,6 +646,24 @@ class TargetOrganizationJSONExporter:
             }
             for future in as_completed(futures):
                 results.append(future.result())
+                if progress_callback is not None:
+                    progress_callback(
+                        len(results),
+                        len(selected),
+                        sum(item.organizations for item in results),
+                        time.monotonic() - started,
+                    )
+        elapsed = time.monotonic() - started
+        written = sum(item.organizations for item in results)
+        rate = written / elapsed if written and elapsed else 0.0
+        required_rate = None
+        projected_days = None
+        meets_deadline = None
+        if expected_organizations is not None and deadline_days is not None:
+            deadline_plan = plan_throughput(expected_organizations, deadline_days)
+            required_rate = deadline_plan.required_per_second
+            projected_days = expected_organizations / rate / 86_400 if rate else None
+            meets_deadline = rate >= required_rate if written else None
         manifest = {
             "schema_version": self.schema_version,
             "generated_at": datetime.now(UTC).isoformat(),
@@ -572,10 +672,19 @@ class TargetOrganizationJSONExporter:
                 "end": end.iso(),
                 "months": len(list(iter_months(start, end))),
             },
-            "organization_count_written": sum(item.organizations for item in results),
+            "organization_count_written": written,
             "export_shards_selected": len(selected),
             "export_shards_skipped": sum(item.skipped for item in results),
             "compressed": self.compressed,
+            "performance": {
+                "elapsed_seconds": round(elapsed, 3),
+                "organizations_per_second": round(rate, 6),
+                "expected_organizations": expected_organizations,
+                "deadline_days": deadline_days,
+                "required_organizations_per_second": required_rate,
+                "projected_days_at_observed_rate": projected_days,
+                "meets_deadline_rate": meets_deadline,
+            },
             "metrics": list(TARGET_METRICS),
             "file_layout": "<org-id-mod-4096-hex>/<organization-id>.json[.gz]",
         }
